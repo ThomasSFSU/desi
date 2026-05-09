@@ -1,6 +1,11 @@
 import { Router, type Request, type Response } from 'express'
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { chat } from '../clients/pipeshift.js'
+import { fetch as fetchSource, type FetchedSource } from '../ingest/fetcher.js'
+import { proposeSources } from '../ingest/sources.js'
+import { store } from '../ingest/store.js'
+import { verify } from '../ingest/verifier.js'
 import { checkComparability } from '../stages/gate.js'
 
 const router = Router()
@@ -53,6 +58,10 @@ async function parseWithRetry(text: string): Promise<ParseResult> {
   throw lastErr
 }
 
+function errorReason(err: unknown): string {
+  return err instanceof Error ? err.message : 'fetch failed'
+}
+
 router.post('/', async (req: Request, res: Response) => {
   const { text } = req.body ?? {}
   if (typeof text !== 'string' || !text.trim()) {
@@ -85,7 +94,85 @@ router.post('/', async (req: Request, res: Response) => {
     })
   }
 
-  return res.json({ ...parsed, gate })
+  let proposed
+  try {
+    proposed = await proposeSources(parsed)
+  } catch (err) {
+    console.error('source proposal failed after retry:', err)
+    return res.status(502).json({ error: 'source proposal failed' })
+  }
+
+  const settled = await Promise.allSettled(proposed.sources.map((source) => fetchSource(source)))
+  const fetched: FetchedSource[] = settled.map((result, index) => {
+    if (result.status === 'fulfilled') return result.value
+
+    return {
+      ...proposed.sources[index],
+      status: 'failed',
+      reason: errorReason(result.reason),
+      fetchedAt: new Date().toISOString(),
+    }
+  })
+  const verified = fetched.map((item) => ({
+    fetched: item,
+    verification: verify(item),
+  }))
+
+  const rejected = verified
+    .filter(({ verification }) => verification.status === 'rejected')
+    .map(({ fetched: item, verification }) => ({
+      url: item.url,
+      reason: verification.reason ?? 'rejected',
+    }))
+  const accepted = verified.length - rejected.length
+  const verifiedFacts = verified.flatMap(({ verification }) => verification.verifiedFacts)
+  const acceptedChars = verified.reduce((sum, { fetched: item, verification }) => {
+    if (verification.status !== 'accepted' || item.status !== 'ok') return sum
+    return sum + item.content.length
+  }, 0)
+  const summary = {
+    accepted,
+    rejected,
+    verifiedFacts: verifiedFacts.length,
+    totalTokensApprox: Math.ceil(acceptedChars / 4),
+  }
+  const sources = verified.map(({ fetched: item, verification }) => ({
+    url: item.url,
+    tier: item.tier,
+    option: item.option,
+    fetchedAt: item.fetchedAt,
+    status: verification.status,
+    fetchStatus: item.status,
+    title: item.status === 'ok' ? item.title : null,
+    publishedAt: item.status === 'ok' ? item.publishedAt : null,
+    reason: verification.status === 'rejected' ? verification.reason ?? null : null,
+  }))
+  const comparisonId = randomUUID()
+
+  try {
+    await store({
+      comparisonId,
+      createdAt: new Date().toISOString(),
+      comparison: { ...parsed, gate },
+      proposedSources: proposed.sources,
+      fetched,
+      verified,
+      summary,
+    })
+  } catch (err) {
+    console.error('corpus store failed:', err)
+    return res.status(500).json({ error: 'corpus store failed' })
+  }
+
+  return res.json({
+    ...parsed,
+    gate,
+    comparisonId,
+    ingest: {
+      ...summary,
+      sources,
+    },
+  })
 })
 
 export default router

@@ -1,8 +1,16 @@
 type Status = 'pending' | 'running' | 'done' | 'error'
 
+type IngestSummary = {
+  accepted: number
+  rejected: Array<{ url: string; reason: string }>
+  verifiedFacts: number
+  totalTokensApprox: number
+}
+
 interface StageCardProps {
   name: string
   status: Status
+  ingest?: IngestSummary
 }
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -19,7 +27,7 @@ const STATUS_BADGE: Record<Status, string> = {
   error:   'bg-red-500/10 text-red-300 ring-1 ring-red-500/30',
 }
 
-export default function StageCard({ name, status }: StageCardProps) {
+export default function StageCard({ name, status, ingest }: StageCardProps) {
   const isRunning = status === 'running'
   const isPending = status === 'pending'
   const isDone = status === 'done'
@@ -62,7 +70,47 @@ export default function StageCard({ name, status }: StageCardProps) {
       </div>
 
       <div className="mt-3 text-sm">
-        {isPending ? (
+        {ingest ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-300 ring-1 ring-emerald-500/30">
+                {ingest.accepted} accepted
+              </span>
+              <span className="inline-flex rounded-full bg-red-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-red-300 ring-1 ring-red-500/30">
+                {ingest.rejected.length} rejected
+              </span>
+              <span className="text-xs text-zinc-500">
+                {ingest.totalTokensApprox.toLocaleString()} estimated tokens
+              </span>
+              <span className="text-xs text-zinc-600">
+                {ingest.verifiedFacts.toLocaleString()} pricing facts
+              </span>
+            </div>
+
+            {ingest.rejected.length > 0 && (
+              <div className="rounded-md border border-red-500/20 bg-red-500/5 p-3">
+                <p className="text-[10px] font-medium uppercase tracking-wider text-red-300">
+                  Rejected sources
+                </p>
+                <ul className="mt-2 space-y-2">
+                  {ingest.rejected.map((source) => (
+                    <li key={source.url} className="text-xs leading-5">
+                      <a
+                        href={source.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="break-all text-zinc-200 underline decoration-zinc-700 underline-offset-2 transition hover:text-white"
+                      >
+                        {source.url}
+                      </a>
+                      <span className="ml-2 text-zinc-500">{source.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        ) : isPending ? (
           <div className="space-y-2">
             <div className="shimmer h-2.5 w-2/3 rounded bg-zinc-900" />
             <div className="shimmer h-2.5 w-1/2 rounded bg-zinc-900" />

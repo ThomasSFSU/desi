@@ -8,11 +8,33 @@ type GateInfo = {
   suggestedRefinement: string | null
 }
 
+type IngestSource = {
+  url: string
+  tier: 1 | 2 | 3
+  option: string
+  fetchedAt: string
+  status: 'accepted' | 'rejected'
+  fetchStatus: 'ok' | 'failed'
+  title: string | null
+  publishedAt: string | null
+  reason: string | null
+}
+
+type IngestSummary = {
+  accepted: number
+  rejected: Array<{ url: string; reason: string }>
+  verifiedFacts: number
+  totalTokensApprox: number
+  sources: IngestSource[]
+}
+
 type ParseResult = {
   optionA: string
   optionB: string
   domain: string
+  comparisonId?: string
   gate?: GateInfo
+  ingest?: IngestSummary
   status?: 'rejected'
   stage?: 'gate'
   reason?: string | null
@@ -148,18 +170,23 @@ export default function App() {
 
               <ComparabilityCard parsed={parsed} />
 
-              {STAGES.map((name, i) => (
-                <div
-                  key={name}
-                  className={[
-                    'animate-fade-up',
-                    parsed.status === 'rejected' && 'opacity-40',
-                  ].filter(Boolean).join(' ')}
-                  style={{ animationDelay: `${160 + i * 60}ms` }}
-                >
-                  <StageCard name={name} status="pending" />
-                </div>
-              ))}
+              {STAGES.map((name, i) => {
+                const ingest = name === 'Ingest' ? parsed.ingest : undefined
+                const status = ingest ? 'done' : 'pending'
+
+                return (
+                  <div
+                    key={name}
+                    className={[
+                      'animate-fade-up',
+                      parsed.status === 'rejected' && 'opacity-40',
+                    ].filter(Boolean).join(' ')}
+                    style={{ animationDelay: `${160 + i * 60}ms` }}
+                  >
+                    <StageCard name={name} status={status} ingest={ingest} />
+                  </div>
+                )
+              })}
             </div>
             <div
               className={[
@@ -168,7 +195,7 @@ export default function App() {
               ].filter(Boolean).join(' ')}
               style={{ animationDelay: '220ms' }}
             >
-              <SourcesPanel />
+              <SourcesPanel sources={parsed.ingest?.sources} />
             </div>
           </div>
         )}
