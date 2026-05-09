@@ -1,13 +1,14 @@
 import { Router, type Request, type Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { chat } from '../clients/pipeshift.js'
+import { chat, CHEAP_MODEL } from '../clients/pipeshift.js'
 import { extractCriteria } from '../extract/criteria.js'
 import { fetch as fetchSource, type FetchedSource } from '../ingest/fetcher.js'
 import { proposeSources } from '../ingest/sources.js'
 import { store } from '../ingest/store.js'
 import { verify } from '../ingest/verifier.js'
 import { checkComparability } from '../stages/gate.js'
+import { scoreAll, type ScoreEntry } from '../stages/score.js'
 
 const router = Router()
 
@@ -97,35 +98,56 @@ function errorReason(err: unknown): string {
 }
 
 router.post('/', async (req: Request, res: Response) => {
-  const { text } = req.body ?? {}
+  const { text, thinking } = req.body ?? {}
   if (typeof text !== 'string' || !text.trim()) {
     return res.status(400).json({ error: 'text is required' })
+  }
+  const thinkingMode = thinking === true
+
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8')
+  res.setHeader('Cache-Control', 'no-cache, no-transform')
+  res.setHeader('X-Accel-Buffering', 'no')
+  res.flushHeaders()
+
+  const send = (event: Record<string, unknown>) => {
+    res.write(JSON.stringify(event) + '\n')
   }
 
   let parsed: ParseResult
   try {
     parsed = await parseWithRetry(text)
+    send({ type: 'parsed', data: parsed })
   } catch (err) {
     console.error('compare parse failed after retry:', err)
-    return res.status(502).json({ error: 'failed to parse query' })
+    send({ type: 'fatal', stage: 'parse', reason: errorReason(err) })
+    return res.end()
   }
 
   let gate
   try {
     gate = await checkComparability(parsed)
+    send({ type: 'gate', data: gate })
   } catch (err) {
     console.error('comparability check failed after retry:', err)
-    return res.status(502).json({ error: 'comparability check failed' })
+    send({ type: 'fatal', stage: 'gate', reason: errorReason(err) })
+    return res.end()
   }
 
   if (!gate.comparable) {
-    return res.json({
-      ...parsed,
-      stage: 'gate',
-      status: 'rejected',
-      reason: gate.reason,
-      suggestedRefinement: gate.suggestedRefinement,
+    send({
+      type: 'rejected',
+      data: {
+        stage: 'gate',
+        reason: gate.reason,
+        suggestedRefinement: gate.suggestedRefinement,
+      },
     })
+    return res.end()
+  }
+
+  const pipelineStatus: { failedStage: string | null; reason: string | null } = {
+    failedStage: null,
+    reason: null,
   }
 
   let proposed
@@ -133,61 +155,126 @@ router.post('/', async (req: Request, res: Response) => {
     proposed = await proposeSources(parsed)
   } catch (err) {
     console.error('source proposal failed after retry:', err)
-    return res.status(502).json({ error: 'source proposal failed' })
+    pipelineStatus.failedStage = 'Ingest'
+    pipelineStatus.reason = errorReason(err)
   }
 
-  const settled = await Promise.allSettled(proposed.sources.map((source) => fetchSource(source)))
-  const fetched: FetchedSource[] = settled.map((result, index) => {
-    if (result.status === 'fulfilled') return result.value
+  let summary: { accepted: number; rejected: Array<{ url: string; reason: string }>; verifiedFacts: number; totalTokensApprox: number } | undefined
+  let sources: Array<unknown> | undefined
+  let verified: Array<{ fetched: FetchedSource; verification: ReturnType<typeof verify> }> = []
+  let fetched: FetchedSource[] = []
 
-    return {
-      ...proposed.sources[index],
-      status: 'failed',
-      reason: errorReason(result.reason),
-      fetchedAt: new Date().toISOString(),
-    }
-  })
-  const verified = fetched.map((item) => ({
-    fetched: item,
-    verification: verify(item),
-  }))
-
-  const rejected = verified
-    .filter(({ verification }) => verification.status === 'rejected')
-    .map(({ fetched: item, verification }) => ({
-      url: item.url,
-      reason: verification.reason ?? 'rejected',
+  if (proposed) {
+    const settled = await Promise.allSettled(proposed.sources.map((source) => fetchSource(source)))
+    fetched = settled.map((result, index) => {
+      if (result.status === 'fulfilled') return result.value
+      return {
+        ...proposed.sources[index],
+        status: 'failed',
+        reason: errorReason(result.reason),
+        fetchedAt: new Date().toISOString(),
+      }
+    })
+    verified = fetched.map((item) => ({
+      fetched: item,
+      verification: verify(item),
     }))
-  const accepted = verified.length - rejected.length
-  const verifiedFacts = verified.flatMap(({ verification }) => verification.verifiedFacts)
-  const acceptedChars = verified.reduce((sum, { fetched: item, verification }) => {
-    if (verification.status !== 'accepted' || item.status !== 'ok') return sum
-    return sum + item.content.length
-  }, 0)
-  const summary = {
-    accepted,
-    rejected,
-    verifiedFacts: verifiedFacts.length,
-    totalTokensApprox: Math.ceil(acceptedChars / 4),
+
+    const rejected = verified
+      .filter(({ verification }) => verification.status === 'rejected')
+      .map(({ fetched: item, verification }) => ({
+        url: item.url,
+        reason: verification.reason ?? 'rejected',
+      }))
+    const accepted = verified.length - rejected.length
+    const verifiedFacts = verified.flatMap(({ verification }) => verification.verifiedFacts)
+    const acceptedChars = verified.reduce((sum, { fetched: item, verification }) => {
+      if (verification.status !== 'accepted' || item.status !== 'ok') return sum
+      return sum + item.content.length
+    }, 0)
+    summary = {
+      accepted,
+      rejected,
+      verifiedFacts: verifiedFacts.length,
+      totalTokensApprox: Math.ceil(acceptedChars / 4),
+    }
+    sources = verified.map(({ fetched: item, verification }) => ({
+      url: item.url,
+      tier: item.tier,
+      option: item.option,
+      fetchedAt: item.fetchedAt,
+      status: verification.status,
+      fetchStatus: item.status,
+      title: item.status === 'ok' ? item.title : null,
+      publishedAt: item.status === 'ok' ? item.publishedAt : null,
+      reason: verification.status === 'rejected' ? verification.reason ?? null : null,
+    }))
+
+    send({ type: 'ingest', data: { ...summary, sources } })
+  } else {
+    send({ type: 'pipelineFailure', data: { failedStage: pipelineStatus.failedStage, reason: pipelineStatus.reason } })
   }
-  const sources = verified.map(({ fetched: item, verification }) => ({
-    url: item.url,
-    tier: item.tier,
-    option: item.option,
-    fetchedAt: item.fetchedAt,
-    status: verification.status,
-    fetchStatus: item.status,
-    title: item.status === 'ok' ? item.title : null,
-    publishedAt: item.status === 'ok' ? item.publishedAt : null,
-    reason: verification.status === 'rejected' ? verification.reason ?? null : null,
-  }))
 
   let criteria
-  try {
-    criteria = await extractCriteria({ ...parsed, verified })
-  } catch (err) {
-    console.error('criteria extraction failed after retry:', err)
-    return res.status(502).json({ error: 'criteria extraction failed' })
+  if (!pipelineStatus.failedStage) {
+    try {
+      criteria = await extractCriteria({ ...parsed, verified })
+      send({ type: 'criteria', data: criteria })
+    } catch (err) {
+      console.error('criteria extraction failed after retry:', err)
+      pipelineStatus.failedStage = 'Extract Criteria'
+      pipelineStatus.reason = errorReason(err)
+      send({ type: 'pipelineFailure', data: { failedStage: pipelineStatus.failedStage, reason: pipelineStatus.reason } })
+    }
+  }
+
+  let scoring
+  let scoringResponse
+  if (!pipelineStatus.failedStage && criteria) {
+    try {
+      scoring = await scoreAll({
+        optionA: parsed.optionA,
+        optionB: parsed.optionB,
+        criteria: criteria.criteria,
+        corpus: verified,
+        model: thinkingMode ? undefined : CHEAP_MODEL,
+      })
+      const perCriterion = criteria.criteria.map((criterion) => {
+        const a = scoring!.optionA.scores.find((s: ScoreEntry) => s.criterion === criterion.name)
+        const b = scoring!.optionB.scores.find((s: ScoreEntry) => s.criterion === criterion.name)
+        return {
+          criterion: criterion.name,
+          weight: criterion.weight,
+          a: a
+            ? {
+                score: a.score,
+                confidence: a.confidence,
+                citationCount: a.citations.length,
+                reason: a.reason,
+              }
+            : null,
+          b: b
+            ? {
+                score: b.score,
+                confidence: b.confidence,
+                citationCount: b.citations.length,
+                reason: b.reason,
+              }
+            : null,
+        }
+      })
+      scoringResponse = {
+        optionA: scoring.optionA,
+        optionB: scoring.optionB,
+        perCriterion,
+      }
+      send({ type: 'scoring', data: scoringResponse })
+    } catch (err) {
+      console.error('scoring failed:', err)
+      pipelineStatus.failedStage = 'Score'
+      pipelineStatus.reason = errorReason(err)
+      send({ type: 'pipelineFailure', data: { failedStage: pipelineStatus.failedStage, reason: pipelineStatus.reason } })
+    }
   }
 
   const comparisonId = randomUUID()
@@ -197,27 +284,21 @@ router.post('/', async (req: Request, res: Response) => {
       comparisonId,
       createdAt: new Date().toISOString(),
       comparison: { ...parsed, gate },
-      proposedSources: proposed.sources,
+      proposedSources: proposed?.sources ?? [],
       fetched,
       verified,
       ingestSummary: summary,
       criteria,
+      scoring,
+      pipelineStatus,
+      thinkingMode,
     })
   } catch (err) {
     console.error('corpus store failed:', err)
-    return res.status(500).json({ error: 'corpus store failed' })
   }
 
-  return res.json({
-    ...parsed,
-    gate,
-    comparisonId,
-    ingest: {
-      ...summary,
-      sources,
-    },
-    criteria,
-  })
+  send({ type: 'done', data: { comparisonId, thinkingMode, usedLighterModel: !thinkingMode } })
+  return res.end()
 })
 
 export default router

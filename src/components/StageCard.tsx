@@ -1,4 +1,6 @@
-type Status = 'pending' | 'running' | 'done' | 'error'
+import { useState } from 'react'
+
+type Status = 'pending' | 'running' | 'done' | 'error' | 'skipped'
 
 type IngestSummary = {
   accepted: number
@@ -23,11 +25,40 @@ type CriteriaSummary = {
   totalTokensApprox: number
 }
 
+export type Citation = {
+  sourceUrl: string
+  quotedText: string
+  tier: 1 | 2 | 3
+  fetchedAt?: string
+}
+
+export type ScoreEntry = {
+  criterion: string
+  score: number | null
+  citations: Citation[]
+  reason?: string
+  confidence: number
+}
+
+export type ScoringSummary = {
+  optionA: { option: string; scores: ScoreEntry[]; corpusSize: number }
+  optionB: { option: string; scores: ScoreEntry[]; corpusSize: number }
+  perCriterion: Array<{
+    criterion: string
+    weight: number
+    a: { score: number | null; confidence: number; citationCount: number; reason?: string } | null
+    b: { score: number | null; confidence: number; citationCount: number; reason?: string } | null
+  }>
+}
+
 interface StageCardProps {
   name: string
   status: Status
   ingest?: IngestSummary
   criteria?: CriteriaSummary
+  scoring?: ScoringSummary
+  errorReason?: string | null
+  skipReason?: string | null
 }
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -35,6 +66,7 @@ const STATUS_LABEL: Record<Status, string> = {
   running: 'Running',
   done: 'Done',
   error: 'Error',
+  skipped: 'Skipped',
 }
 
 const STATUS_BADGE: Record<Status, string> = {
@@ -42,15 +74,24 @@ const STATUS_BADGE: Record<Status, string> = {
   running: 'bg-zinc-900 text-zinc-100 ring-1 ring-zinc-700',
   done:    'bg-zinc-900 text-zinc-100 ring-1 ring-zinc-700',
   error:   'bg-red-500/10 text-red-300 ring-1 ring-red-500/30',
+  skipped: 'bg-zinc-900/50 text-zinc-600 ring-1 ring-zinc-800',
 }
 
-export default function StageCard({ name, status, ingest, criteria }: StageCardProps) {
+export default function StageCard({ name, status, ingest, criteria, scoring, errorReason, skipReason }: StageCardProps) {
   const isRunning = status === 'running'
   const isPending = status === 'pending'
   const isDone = status === 'done'
+  const isError = status === 'error'
+  const isSkipped = status === 'skipped'
 
   return (
-    <div className="group relative overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 p-4 transition duration-200 hover:border-zinc-700">
+    <div
+      className={[
+        'group relative overflow-hidden rounded-lg border bg-zinc-950 p-4 transition duration-200',
+        isError ? 'border-red-500/40' : 'border-zinc-800 hover:border-zinc-700',
+        isSkipped && 'opacity-60',
+      ].filter(Boolean).join(' ')}
+    >
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <span
@@ -59,7 +100,8 @@ export default function StageCard({ name, status, ingest, criteria }: StageCardP
               isPending && 'bg-zinc-700',
               isRunning && 'bg-zinc-100 animate-pulse-soft',
               isDone && 'bg-zinc-100',
-              status === 'error' && 'bg-red-400',
+              isError && 'bg-red-400',
+              isSkipped && 'bg-zinc-700',
             ].filter(Boolean).join(' ')}
           />
           <h3 className="text-sm font-medium text-zinc-100">{name}</h3>
@@ -87,7 +129,20 @@ export default function StageCard({ name, status, ingest, criteria }: StageCardP
       </div>
 
       <div className="mt-3 text-sm">
-        {ingest ? (
+        {isError ? (
+          <div className="rounded-md border border-red-500/30 bg-red-500/5 p-3">
+            <p className="text-[10px] font-medium uppercase tracking-wider text-red-300">
+              Stage failed
+            </p>
+            <p className="mt-1 text-xs leading-5 text-red-200">
+              {errorReason ?? 'Unknown error'}
+            </p>
+          </div>
+        ) : isSkipped ? (
+          <p className="text-xs italic text-zinc-500">
+            {skipReason ?? 'Not run due to pipeline failure'}
+          </p>
+        ) : ingest ? (
           <div className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="inline-flex rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-300 ring-1 ring-emerald-500/30">
@@ -165,6 +220,8 @@ export default function StageCard({ name, status, ingest, criteria }: StageCardP
               </p>
             )}
           </div>
+        ) : scoring ? (
+          <ScoreTable scoring={scoring} />
         ) : isPending ? (
           <div className="space-y-2">
             <div className="shimmer h-2.5 w-2/3 rounded bg-zinc-900" />
@@ -174,6 +231,208 @@ export default function StageCard({ name, status, ingest, criteria }: StageCardP
           <p className="text-zinc-500">Awaiting citations…</p>
         )}
       </div>
+    </div>
+  )
+}
+
+type CellSelection = {
+  optionLabel: string
+  criterion: string
+  entry: ScoreEntry
+} | null
+
+function ScoreTable({ scoring }: { scoring: ScoringSummary }) {
+  const [selected, setSelected] = useState<CellSelection>(null)
+
+  const findEntry = (criterion: string, side: 'a' | 'b'): ScoreEntry | undefined => {
+    const list = side === 'a' ? scoring.optionA.scores : scoring.optionB.scores
+    return list.find((s) => s.criterion === criterion)
+  }
+
+  const openCell = (criterion: string, side: 'a' | 'b') => {
+    const entry = findEntry(criterion, side)
+    if (!entry || entry.citations.length === 0) return
+    setSelected({
+      optionLabel: side === 'a' ? scoring.optionA.option : scoring.optionB.option,
+      criterion,
+      entry,
+    })
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="overflow-hidden rounded-md border border-zinc-800">
+        <table className="w-full text-xs">
+          <thead className="bg-zinc-900/60 text-[10px] uppercase tracking-wider text-zinc-500">
+            <tr>
+              <th className="px-3 py-2 text-left font-medium">Criterion</th>
+              <th className="px-3 py-2 text-left font-medium text-blue-300">{scoring.optionA.option}</th>
+              <th className="px-3 py-2 text-left font-medium text-emerald-300">{scoring.optionB.option}</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-zinc-800">
+            {scoring.perCriterion.map((row) => (
+              <tr key={row.criterion}>
+                <td className="px-3 py-2.5 align-top">
+                  <div className="font-medium text-zinc-100">{row.criterion}</div>
+                  <div className="mt-0.5 text-[10px] text-zinc-500">weight {row.weight}</div>
+                </td>
+                <ScoreCell
+                  cell={row.a}
+                  onOpen={() => openCell(row.criterion, 'a')}
+                />
+                <ScoreCell
+                  cell={row.b}
+                  onOpen={() => openCell(row.criterion, 'b')}
+                />
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {selected && (
+        <CitationPanel selection={selected} onClose={() => setSelected(null)} />
+      )}
+    </div>
+  )
+}
+
+function ScoreCell({
+  cell,
+  onOpen,
+}: {
+  cell: ScoringSummary['perCriterion'][number]['a']
+  onOpen: () => void
+}) {
+  if (!cell) {
+    return <td className="px-3 py-2.5 align-top text-zinc-600">—</td>
+  }
+
+  if (cell.score === null) {
+    return (
+      <td className="px-3 py-2.5 align-top">
+        <div className="text-zinc-400">Insufficient evidence</div>
+        {cell.reason && (
+          <div className="mt-0.5 text-[10px] text-zinc-600">{cell.reason}</div>
+        )}
+      </td>
+    )
+  }
+
+  const pct = Math.round(cell.confidence * 100)
+  const canOpen = cell.citationCount > 0
+
+  return (
+    <td className="px-3 py-2.5 align-top">
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-sm font-medium text-zinc-100">
+          {cell.score}/10
+        </span>
+        <button
+          type="button"
+          onClick={onOpen}
+          disabled={!canOpen}
+          className={[
+            'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ring-1 transition',
+            canOpen
+              ? 'bg-zinc-900 text-zinc-200 ring-zinc-700 hover:bg-zinc-800 hover:text-white cursor-pointer'
+              : 'bg-zinc-950 text-zinc-600 ring-zinc-800 cursor-default',
+          ].join(' ')}
+          title={canOpen ? 'View citations' : 'No citations'}
+        >
+          {cell.citationCount} cite{cell.citationCount === 1 ? '' : 's'}
+        </button>
+      </div>
+      <div className="mt-1.5 flex items-center gap-2">
+        <div className="h-1 w-20 overflow-hidden rounded-full bg-zinc-900">
+          <div
+            className="h-full bg-zinc-300 transition-all"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+        <span className="text-[10px] text-zinc-500">{pct}%</span>
+      </div>
+    </td>
+  )
+}
+
+function tierLabel(tier: 1 | 2 | 3): string {
+  if (tier === 1) return 'Vendor'
+  if (tier === 2) return 'Review'
+  return 'Community'
+}
+
+function tierBadgeClasses(tier: 1 | 2 | 3): string {
+  if (tier === 1) return 'bg-blue-500/10 text-blue-300 ring-blue-500/30'
+  if (tier === 2) return 'bg-amber-500/10 text-amber-300 ring-amber-500/30'
+  return 'bg-zinc-800 text-zinc-300 ring-zinc-700'
+}
+
+function CitationPanel({
+  selection,
+  onClose,
+}: {
+  selection: NonNullable<CellSelection>
+  onClose: () => void
+}) {
+  const { optionLabel, criterion, entry } = selection
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+            Citations
+          </div>
+          <div className="mt-0.5 text-xs text-zinc-200">
+            <span className="font-medium">{optionLabel}</span>
+            <span className="text-zinc-500"> · {criterion}</span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-100"
+        >
+          Close
+        </button>
+      </div>
+
+      <ul className="mt-3 space-y-2">
+        {entry.citations.map((citation, i) => (
+          <li
+            key={`${citation.sourceUrl}-${i}`}
+            className="rounded-md border border-zinc-800 bg-zinc-950 p-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <a
+                href={citation.sourceUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="break-all text-xs text-zinc-200 underline decoration-zinc-700 underline-offset-2 hover:text-white"
+              >
+                {citation.sourceUrl}
+              </a>
+              <span
+                className={[
+                  'shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ring-1',
+                  tierBadgeClasses(citation.tier),
+                ].join(' ')}
+              >
+                T{citation.tier} · {tierLabel(citation.tier)}
+              </span>
+            </div>
+            <blockquote className="mt-2 border-l-2 border-zinc-700 pl-3 text-xs italic leading-5 text-zinc-300">
+              "{citation.quotedText}"
+            </blockquote>
+            {citation.fetchedAt && (
+              <div className="mt-2 text-[10px] text-zinc-600">
+                Fetched {new Date(citation.fetchedAt).toLocaleString()}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import StageCard from './components/StageCard'
+import StageCard, { type ScoringSummary } from './components/StageCard'
 import SourcesPanel from './components/SourcesPanel'
 
 type GateInfo = {
@@ -44,6 +44,11 @@ type CriteriaSummary = {
   totalTokensApprox: number
 }
 
+type PipelineStatus = {
+  failedStage: string | null
+  reason: string | null
+}
+
 type ParseResult = {
   optionA: string
   optionB: string
@@ -52,6 +57,9 @@ type ParseResult = {
   gate?: GateInfo
   ingest?: IngestSummary
   criteria?: CriteriaSummary
+  scoring?: ScoringSummary
+  pipelineStatus?: PipelineStatus
+  scoringSkipped?: boolean
   status?: 'rejected'
   stage?: 'gate'
   reason?: string | null
@@ -72,26 +80,98 @@ const DEFAULT_COMPARISONS = [
   'Claude vs Gemini',
 ] as const
 
+type StreamEvent =
+  | { type: 'parsed'; data: { optionA: string; optionB: string; domain: string } }
+  | { type: 'gate'; data: GateInfo }
+  | { type: 'rejected'; data: { stage: string; reason: string | null; suggestedRefinement: string | null } }
+  | { type: 'ingest'; data: IngestSummary }
+  | { type: 'criteria'; data: CriteriaSummary }
+  | { type: 'scoring'; data: ScoringSummary }
+  | { type: 'pipelineFailure'; data: { failedStage: string | null; reason: string | null } }
+  | { type: 'fatal'; stage: string; reason: string }
+  | { type: 'done'; data: { comparisonId: string; thinkingMode: boolean; scoringSkipped: boolean } }
+
 export default function App() {
   const [input, setInput] = useState('')
+  const [thinkingMode, setThinkingMode] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [parsed, setParsed] = useState<ParseResult | null>(null)
   const [error, setError] = useState<string | null>(null)
+
+  function applyEvent(event: StreamEvent) {
+    setParsed((prev) => {
+      const base: ParseResult = prev ?? { optionA: '', optionB: '', domain: '' }
+      switch (event.type) {
+        case 'parsed':
+          return { ...base, ...event.data }
+        case 'gate':
+          return { ...base, gate: event.data }
+        case 'rejected':
+          return {
+            ...base,
+            status: 'rejected',
+            stage: 'gate',
+            reason: event.data.reason,
+            suggestedRefinement: event.data.suggestedRefinement,
+          }
+        case 'ingest':
+          return { ...base, ingest: event.data }
+        case 'criteria':
+          return { ...base, criteria: event.data }
+        case 'scoring':
+          return { ...base, scoring: event.data }
+        case 'pipelineFailure':
+          return { ...base, pipelineStatus: event.data }
+        case 'fatal':
+          return { ...base, pipelineStatus: { failedStage: event.stage, reason: event.reason } }
+        case 'done':
+          return { ...base, comparisonId: event.data.comparisonId, scoringSkipped: event.data.scoringSkipped }
+        default:
+          return base
+      }
+    })
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     if (!input.trim()) return
     setSubmitting(true)
     setError(null)
+    setParsed(null)
     try {
       const res = await fetch('/api/compare', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: input }),
+        body: JSON.stringify({ text: input, thinking: thinkingMode }),
       })
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`)
-      const data: ParseResult = await res.json()
-      setParsed(data)
+      if (!res.ok || !res.body) throw new Error(`Request failed: ${res.status}`)
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+          try {
+            applyEvent(JSON.parse(trimmed) as StreamEvent)
+          } catch (err) {
+            console.warn('failed to parse stream event:', trimmed, err)
+          }
+        }
+      }
+      if (buffer.trim()) {
+        try {
+          applyEvent(JSON.parse(buffer) as StreamEvent)
+        } catch (err) {
+          console.warn('failed to parse trailing event:', buffer, err)
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -167,6 +247,25 @@ export default function App() {
                 </button>
               ))}
             </div>
+            <label className="flex cursor-pointer items-start gap-2.5 rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2.5 transition hover:border-zinc-700">
+              <input
+                type="checkbox"
+                checked={thinkingMode}
+                onChange={(e) => setThinkingMode(e.target.checked)}
+                className="mt-0.5 h-3.5 w-3.5 cursor-pointer rounded border-zinc-700 bg-zinc-900 accent-zinc-100"
+              />
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium text-zinc-200">Thinking mode</span>
+                  <span className="rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-amber-300 ring-1 ring-amber-500/30">
+                    Slow
+                  </span>
+                </div>
+                <p className="mt-0.5 text-[11px] leading-4 text-zinc-500">
+                  Run the heavy reasoning model to score each criterion with citations. Adds 30-60s.
+                </p>
+              </div>
+            </label>
             <div className="flex items-center gap-3">
               <button
                 type="submit"
@@ -211,7 +310,24 @@ export default function App() {
               {STAGES.map((name, i) => {
                 const ingest = name === 'Ingest' ? parsed.ingest : undefined
                 const criteria = name === 'Extract Criteria' ? parsed.criteria : undefined
-                const status = ingest || criteria ? 'done' : 'pending'
+                const scoring = name === 'Score' ? parsed.scoring : undefined
+                const failedStage = parsed.pipelineStatus?.failedStage ?? null
+                const failedIndex = failedStage ? STAGES.indexOf(failedStage as typeof STAGES[number]) : -1
+                const hasData = Boolean(ingest || criteria || scoring)
+                const scoringIntentionallySkipped =
+                  name === 'Score' && parsed.scoringSkipped && !scoring && !failedStage
+
+                let status: 'done' | 'error' | 'skipped' | 'pending'
+                if (hasData) status = 'done'
+                else if (failedStage === name) status = 'error'
+                else if (failedIndex >= 0 && i > failedIndex) status = 'skipped'
+                else if (scoringIntentionallySkipped) status = 'skipped'
+                else status = 'pending'
+
+                const errorReason = status === 'error' ? parsed.pipelineStatus?.reason ?? null : null
+                const skipReason = scoringIntentionallySkipped
+                  ? 'Enable Thinking Mode to score with citations'
+                  : null
 
                 return (
                   <div
@@ -222,7 +338,15 @@ export default function App() {
                     ].filter(Boolean).join(' ')}
                     style={{ animationDelay: `${160 + i * 60}ms` }}
                   >
-                    <StageCard name={name} status={status} ingest={ingest} criteria={criteria} />
+                    <StageCard
+                      name={name}
+                      status={status}
+                      ingest={ingest}
+                      criteria={criteria}
+                      scoring={scoring}
+                      errorReason={errorReason}
+                      skipReason={skipReason}
+                    />
                   </div>
                 )
               })}
