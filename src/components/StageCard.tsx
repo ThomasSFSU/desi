@@ -7,10 +7,27 @@ type IngestSummary = {
   totalTokensApprox: number
 }
 
+type Criterion = {
+  id: string
+  name: string
+  description: string
+  weight: number
+  signals: string[]
+  sources: string[]
+}
+
+type CriteriaSummary = {
+  criteria: Criterion[]
+  notes: string[]
+  sourceCount: number
+  totalTokensApprox: number
+}
+
 interface StageCardProps {
   name: string
   status: Status
   ingest?: IngestSummary
+  criteria?: CriteriaSummary
 }
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -27,7 +44,7 @@ const STATUS_BADGE: Record<Status, string> = {
   error:   'bg-red-500/10 text-red-300 ring-1 ring-red-500/30',
 }
 
-export default function StageCard({ name, status, ingest }: StageCardProps) {
+export default function StageCard({ name, status, ingest, criteria }: StageCardProps) {
   const isRunning = status === 'running'
   const isPending = status === 'pending'
   const isDone = status === 'done'
@@ -108,6 +125,44 @@ export default function StageCard({ name, status, ingest }: StageCardProps) {
                   ))}
                 </ul>
               </div>
+            )}
+          </div>
+        ) : criteria ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider text-emerald-300 ring-1 ring-emerald-500/30">
+                {criteria.criteria.length} criteria
+              </span>
+              <span className="text-xs text-zinc-500">
+                {criteria.sourceCount} sources
+              </span>
+              <span className="text-xs text-zinc-600">
+                {criteria.totalTokensApprox.toLocaleString()} estimated tokens
+              </span>
+            </div>
+
+            {criteria.criteria.length > 0 ? (
+              <div className="grid gap-2 sm:grid-cols-2">
+                {criteria.criteria.map((criterion) => (
+                  <div key={criterion.id} className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <h4 className="text-xs font-medium leading-5 text-zinc-100">
+                        {criterion.name}
+                      </h4>
+                      <span className="shrink-0 rounded bg-zinc-950 px-1.5 py-0.5 text-[10px] text-zinc-400 ring-1 ring-zinc-800">
+                        W{criterion.weight}
+                      </span>
+                    </div>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-zinc-500">
+                      {criterion.description}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-zinc-500">
+                {criteria.notes[0] ?? 'No criteria extracted.'}
+              </p>
             )}
           </div>
         ) : isPending ? (

@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { chat } from '../clients/pipeshift.js'
+import { extractCriteria } from '../extract/criteria.js'
 import { fetch as fetchSource, type FetchedSource } from '../ingest/fetcher.js'
 import { proposeSources } from '../ingest/sources.js'
 import { store } from '../ingest/store.js'
@@ -27,6 +28,8 @@ Return ONLY a JSON object with exactly these keys:
 
 Do not include any other keys, prose, or markdown. If the query does not clearly compare two things, infer the most reasonable two options and a domain anyway.`
 
+const JSON_ONLY = `Return only valid JSON. No prose, markdown, bullets, headings, or explanation.`
+
 function extractJson(raw: string): string {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fenced) return fenced[1].trim()
@@ -35,22 +38,53 @@ function extractJson(raw: string): string {
   return raw.trim()
 }
 
-async function parseQuery(text: string): Promise<unknown> {
+function looseField(raw: string, key: keyof ParseResult): string | null {
+  const match = raw.match(new RegExp(`["']${key}["']\\s*:\\s*["']([^"']+)["']`, 'i'))
+  return match?.[1]?.trim() || null
+}
+
+function parseLooseJson(raw: string): unknown {
+  const json = extractJson(raw)
+  const optionA = looseField(json, 'optionA')
+  const optionB = looseField(json, 'optionB')
+  const domain = looseField(json, 'domain')
+  if (optionA && optionB && domain) return { optionA, optionB, domain }
+  throw new ParseJsonError(raw)
+}
+
+class ParseJsonError extends Error {
+  constructor(readonly raw: string) {
+    super('compare parse returned invalid JSON')
+  }
+}
+
+async function parseQuery(text: string, repairRaw?: string): Promise<unknown> {
   const raw = await chat({
     jsonMode: true,
     messages: [
       { role: 'system', content: SYSTEM_PROMPT },
-      { role: 'user', content: text },
+      {
+        role: 'user',
+        content: repairRaw
+          ? `${JSON_ONLY}\n\nConvert this invalid comparison extraction into valid JSON only with exactly these keys: optionA, optionB, domain.\n\nUser query: ${text}\n\nInvalid output:\n${repairRaw}`
+          : `${JSON_ONLY}\n\n${text}`,
+      },
     ],
   })
-  return JSON.parse(extractJson(raw))
+  try {
+    return JSON.parse(extractJson(raw))
+  } catch {
+    return parseLooseJson(raw)
+  }
 }
 
 async function parseWithRetry(text: string): Promise<ParseResult> {
   let lastErr: unknown
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      return ParseResult.parse(await parseQuery(text))
+      return ParseResult.parse(
+        await parseQuery(text, attempt === 1 && lastErr instanceof ParseJsonError ? lastErr.raw : undefined),
+      )
     } catch (err) {
       lastErr = err
     }
@@ -147,6 +181,15 @@ router.post('/', async (req: Request, res: Response) => {
     publishedAt: item.status === 'ok' ? item.publishedAt : null,
     reason: verification.status === 'rejected' ? verification.reason ?? null : null,
   }))
+
+  let criteria
+  try {
+    criteria = await extractCriteria({ ...parsed, verified })
+  } catch (err) {
+    console.error('criteria extraction failed after retry:', err)
+    return res.status(502).json({ error: 'criteria extraction failed' })
+  }
+
   const comparisonId = randomUUID()
 
   try {
@@ -157,7 +200,8 @@ router.post('/', async (req: Request, res: Response) => {
       proposedSources: proposed.sources,
       fetched,
       verified,
-      summary,
+      ingestSummary: summary,
+      criteria,
     })
   } catch (err) {
     console.error('corpus store failed:', err)
@@ -172,6 +216,7 @@ router.post('/', async (req: Request, res: Response) => {
       ...summary,
       sources,
     },
+    criteria,
   })
 })
 

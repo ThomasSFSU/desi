@@ -27,11 +27,16 @@ async function parseHtml(html: string, url: string): Promise<{
   content: string
   publishedAt: string | null
 }> {
-  const [{ Readability }, { JSDOM }] = await Promise.all([
+  const [{ Readability }, { JSDOM, VirtualConsole }] = await Promise.all([
     import('@mozilla/readability'),
     import('jsdom'),
   ])
-  const dom = new JSDOM(html, { url })
+  const virtualConsole = new VirtualConsole()
+  virtualConsole.on('jsdomError', (err) => {
+    if (err?.message?.includes('Could not parse CSS')) return
+    console.error(err)
+  })
+  const dom = new JSDOM(html, { url, virtualConsole })
   const document = dom.window.document
   const publishedAt = extractPublishedAt(document)
   const article = new Readability(document.cloneNode(true) as Document).parse()

@@ -28,6 +28,22 @@ type IngestSummary = {
   sources: IngestSource[]
 }
 
+type Criterion = {
+  id: string
+  name: string
+  description: string
+  weight: number
+  signals: string[]
+  sources: string[]
+}
+
+type CriteriaSummary = {
+  criteria: Criterion[]
+  notes: string[]
+  sourceCount: number
+  totalTokensApprox: number
+}
+
 type ParseResult = {
   optionA: string
   optionB: string
@@ -35,6 +51,7 @@ type ParseResult = {
   comparisonId?: string
   gate?: GateInfo
   ingest?: IngestSummary
+  criteria?: CriteriaSummary
   status?: 'rejected'
   stage?: 'gate'
   reason?: string | null
@@ -47,6 +64,12 @@ const STAGES = [
   'Score',
   'Cross-Reference',
   'Verdict',
+] as const
+
+const DEFAULT_COMPARISONS = [
+  'Odoo vs Zoho One',
+  'Salesforce vs Oracle',
+  'Claude vs Gemini',
 ] as const
 
 export default function App() {
@@ -129,6 +152,21 @@ export default function App() {
               className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none transition focus:border-zinc-600"
               autoFocus
             />
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[10px] font-medium uppercase tracking-wider text-zinc-600">
+                Try
+              </span>
+              {DEFAULT_COMPARISONS.map((suggestion) => (
+                <button
+                  key={suggestion}
+                  type="button"
+                  onClick={() => setInput(suggestion)}
+                  className="rounded-full border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-xs text-zinc-400 transition hover:border-zinc-700 hover:text-zinc-100"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
             <div className="flex items-center gap-3">
               <button
                 type="submit"
@@ -172,7 +210,8 @@ export default function App() {
 
               {STAGES.map((name, i) => {
                 const ingest = name === 'Ingest' ? parsed.ingest : undefined
-                const status = ingest ? 'done' : 'pending'
+                const criteria = name === 'Extract Criteria' ? parsed.criteria : undefined
+                const status = ingest || criteria ? 'done' : 'pending'
 
                 return (
                   <div
@@ -183,7 +222,7 @@ export default function App() {
                     ].filter(Boolean).join(' ')}
                     style={{ animationDelay: `${160 + i * 60}ms` }}
                   >
-                    <StageCard name={name} status={status} ingest={ingest} />
+                    <StageCard name={name} status={status} ingest={ingest} criteria={criteria} />
                   </div>
                 )
               })}

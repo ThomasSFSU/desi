@@ -29,9 +29,33 @@ interface ProposeSourcesInput {
   domain: string
 }
 
-const SYSTEM_PROMPT = `For each of two options being compared, propose canonical source URLs in three tiers. Tier 1 = vendor's own current pages (homepage, pricing, docs, changelog). Tier 2 = structured third-party review sites (G2, Capterra). Tier 3 = community discussion (Reddit subreddit, HN search results URL). Output JSON: {sources: [{url, tier, option}]}. Use real URL patterns you know. Aim for 5-8 sources per option. Do not invent URLs you're unsure of.`
+const SYSTEM_PROMPT = `Propose ONLY URLs you are confident exist. Strongly prefer the option's own vendor website — those pages are the most reliable to fetch.
 
-const JSON_ONLY = `Return only valid JSON. No prose, markdown, bullets, headings, or explanation. The only valid shape is {"sources":[{"url":"https://example.com","tier":1,"option":"Option name"}]}.`
+The "option" field MUST be one of the two option names from the user message, copied verbatim. It is NEVER a URL path segment like "Reviews", "Products", or "Pricing", and never a tier label.
+
+For each of the two options, propose 3-4 Tier 1 vendor URLs:
+- The vendor root: https://{vendor-domain}/
+- Universally-present paths IF you are confident they exist on this vendor: /pricing, /docs or /documentation, /features, /help.
+
+Tier 2 review URL (optional, at most ONE per option): only if you are confident in the slug, use EXACTLY https://www.g2.com/products/{slug}/reviews. Do NOT invent any other g2.com or capterra.com path. If you are unsure of the slug, omit Tier 2.
+
+Do NOT propose: subdomains of stackexchange.com other than stackoverflow.com; specific article URLs; press release paths; deep links you cannot verify; reddit URLs (their HTML is unreadable to scrapers).
+
+Never repeat the same URL. 3-5 sources per option is enough.
+
+Output exactly ONE top-level JSON object with a single "sources" array containing URLs for BOTH options interleaved or in sequence — never two separate "sources" keys. Shape: {"sources":[{"url":"https://...","tier":1,"option":"<exact option name>"}, ...]}.
+
+Worked example for "Notion vs Obsidian":
+{"sources":[
+  {"url":"https://www.notion.so/","tier":1,"option":"Notion"},
+  {"url":"https://www.notion.so/pricing","tier":1,"option":"Notion"},
+  {"url":"https://www.notion.so/help","tier":1,"option":"Notion"},
+  {"url":"https://obsidian.md/","tier":1,"option":"Obsidian"},
+  {"url":"https://obsidian.md/pricing","tier":1,"option":"Obsidian"},
+  {"url":"https://help.obsidian.md/","tier":1,"option":"Obsidian"}
+]}`
+
+const JSON_ONLY = `Return only valid JSON. No prose, markdown, bullets, headings, or explanation. Each "option" value must be one of the two option names from the user message, copied verbatim — never a URL path segment.`
 
 function extractJson(raw: string): string {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
@@ -39,6 +63,29 @@ function extractJson(raw: string): string {
   const braced = raw.match(/\{[\s\S]*\}/)
   if (braced) return braced[0]
   return raw.trim()
+}
+
+function mergeDuplicateSourcesKeys(json: string): string {
+  const matches = [...json.matchAll(/"sources"\s*:\s*\[([\s\S]*?)\]/g)]
+  if (matches.length < 2) return json
+  const merged = matches
+    .map((m) => m[1].trim())
+    .filter(Boolean)
+    .join(',')
+  return `{"sources":[${merged}]}`
+}
+
+function extractSourceObjects(raw: string): unknown[] {
+  const objects: unknown[] = []
+  const pattern = /\{\s*"url"\s*:\s*"[^"]+"\s*,[^{}]*\}|\{[^{}]*"url"\s*:\s*"[^"]+"[^{}]*\}/g
+  for (const match of raw.matchAll(pattern)) {
+    try {
+      objects.push(JSON.parse(match[0]))
+    } catch {
+      // skip malformed object fragments
+    }
+  }
+  return objects
 }
 
 function dedupeSources(sources: Source[]): Source[] {
@@ -82,11 +129,11 @@ function inferOption(
   url: string,
   input: ProposeSourcesInput,
   currentOption: string | null,
-): string {
+): string | null {
   const haystack = `${line} ${url}`.toLowerCase().replace(/[^a-z0-9]+/g, '')
   if (haystack.includes(optionSlug(input.optionA))) return input.optionA
   if (haystack.includes(optionSlug(input.optionB))) return input.optionB
-  return currentOption ?? input.optionA
+  return currentOption
 }
 
 function parseUrlList(raw: string, input: ProposeSourcesInput): SourcesResult {
@@ -105,10 +152,12 @@ function parseUrlList(raw: string, input: ProposeSourcesInput): SourcesResult {
     const urls = line.match(/https?:\/\/[^\s<>"']+/g) ?? []
     for (const matchedUrl of urls) {
       const url = cleanUrl(matchedUrl)
+      const option = inferOption(line, url, input, currentOption)
+      if (!option) continue
       sources.push({
         url,
         tier: inferTier(line, url, currentTier),
-        option: inferOption(line, url, input, currentOption),
+        option,
       })
     }
   }
@@ -116,14 +165,93 @@ function parseUrlList(raw: string, input: ProposeSourcesInput): SourcesResult {
   return SourcesResult.parse({ sources: dedupeSources(sources) })
 }
 
-function parseSources(raw: string, input: ProposeSourcesInput): SourcesResult {
+function isPlausibleUrl(url: string): boolean {
+  let parsed: URL
   try {
-    const parsed = SourcesResult.parse(JSON.parse(extractJson(raw)))
-    return { sources: dedupeSources(parsed.sources) }
-  } catch (err) {
-    if (/https?:\/\//.test(raw)) return parseUrlList(raw, input)
-    throw err
+    parsed = new URL(url)
+  } catch {
+    return false
   }
+  const host = parsed.hostname.toLowerCase()
+  const path = parsed.pathname
+
+  if (host === 'www.g2.com' || host === 'g2.com') {
+    return /^\/products\/[a-z0-9-]+(?:\/reviews)?\/?$/i.test(path)
+  }
+  if (host === 'www.capterra.com' || host === 'capterra.com') {
+    return /^\/p\/[a-z0-9-]+(?:\/[a-z0-9-]+)?\/?$/i.test(path)
+  }
+  if (host === 'www.reddit.com' || host === 'reddit.com' || host.endsWith('.reddit.com')) {
+    return false
+  }
+  if (host.endsWith('stackexchange.com') && host !== 'stackexchange.com') {
+    return false
+  }
+  return true
+}
+
+function reattributeByUrl(source: Source, input: ProposeSourcesInput): Source | null {
+  const normalized = normalizeOption(source.option)
+  if (normalized === normalizeOption(input.optionA)) return { ...source, option: input.optionA }
+  if (normalized === normalizeOption(input.optionB)) return { ...source, option: input.optionB }
+
+  const haystack = source.url.toLowerCase().replace(/[^a-z0-9]+/g, '')
+  const slugA = optionSlug(input.optionA)
+  const slugB = optionSlug(input.optionB)
+  if (slugA && haystack.includes(slugA)) return { ...source, option: input.optionA }
+  if (slugB && haystack.includes(slugB)) return { ...source, option: input.optionB }
+  return null
+}
+
+function parseSources(raw: string, input: ProposeSourcesInput): SourcesResult {
+  let parsed: SourcesResult | null = null
+  try {
+    parsed = SourcesResult.parse(JSON.parse(mergeDuplicateSourcesKeys(extractJson(raw))))
+  } catch {
+    const objects = extractSourceObjects(raw)
+    if (objects.length > 0) {
+      try {
+        parsed = SourcesResult.parse({ sources: objects })
+      } catch {
+        // fall through to parseUrlList
+      }
+    }
+  }
+
+  if (!parsed) {
+    if (/https?:\/\//.test(raw)) return parseUrlList(raw, input)
+    throw new Error('source proposal could not be parsed')
+  }
+
+  const reattributed = parsed.sources
+    .filter((source) => isPlausibleUrl(source.url))
+    .map((source) => reattributeByUrl(source, input))
+    .filter((source): source is Source => source !== null)
+  return { sources: dedupeSources(reattributed) }
+}
+
+const MIN_SOURCES_PER_OPTION = 1
+
+function normalizeOption(option: string): string {
+  return option.toLowerCase().trim()
+}
+
+function countSourcesByOption(result: SourcesResult): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const source of result.sources) {
+    const key = normalizeOption(source.option)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return counts
+}
+
+function underfilledOptions(
+  counts: Map<string, number>,
+  input: ProposeSourcesInput,
+): string[] {
+  return [input.optionA, input.optionB].filter(
+    (option) => (counts.get(normalizeOption(option)) ?? 0) < MIN_SOURCES_PER_OPTION,
+  )
 }
 
 async function proposeSourcesOnce(input: ProposeSourcesInput, repairRaw?: string): Promise<SourcesResult> {
@@ -135,13 +263,32 @@ async function proposeSourcesOnce(input: ProposeSourcesInput, repairRaw?: string
       {
         role: 'user',
         content: repairRaw
-          ? `${JSON_ONLY}\n\nConvert this invalid source proposal into valid JSON only.\n\nOption A: ${input.optionA}\nOption B: ${input.optionB}\nDomain: ${input.domain}\n\nInvalid output:\n${repairRaw}`
+          ? `${JSON_ONLY}\n\nYour previous response was rejected. Common issues to check:\n- The "option" field must be exactly "${input.optionA}" or "${input.optionB}" — not a URL path word like "Reviews" or "Pricing".\n- Both options need at least ${MIN_SOURCES_PER_OPTION} sources.\n- Do NOT repeat the same URL.\n\nOption A: ${input.optionA}\nOption B: ${input.optionB}\nDomain: ${input.domain}`
           : `${JSON_ONLY}\n\nOption A: ${input.optionA}\nOption B: ${input.optionB}\nDomain: ${input.domain}`,
       },
     ],
   })
   try {
-    return parseSources(raw, input)
+    const parsed = parseSources(raw, input)
+    const counts = countSourcesByOption(parsed)
+    const underfilled = underfilledOptions(counts, input)
+    if (underfilled.length > 0) {
+      console.warn(
+        '[proposeSources] underfilled options',
+        {
+          required: MIN_SOURCES_PER_OPTION,
+          underfilled,
+          counts: Object.fromEntries(counts),
+        },
+      )
+      throw new SourceParseError(
+        raw,
+        new Error(
+          `insufficient sources (need >= ${MIN_SOURCES_PER_OPTION}) for ${underfilled.join(', ')}`,
+        ),
+      )
+    }
+    return parsed
   } catch (err) {
     if (!repairRaw) throw new SourceParseError(raw, err)
     throw err
