@@ -3,17 +3,6 @@ type Status = 'pending' | 'running' | 'done' | 'error'
 interface StageCardProps {
   name: string
   status: Status
-  accent?: AccentKey
-}
-
-export type AccentKey = 'cyan' | 'violet' | 'amber' | 'fuchsia' | 'emerald'
-
-const ACCENT: Record<AccentKey, { dot: string; ring: string; glow: string; text: string }> = {
-  cyan:    { dot: 'bg-cyan-400',    ring: 'ring-cyan-400/30',    glow: 'shadow-[0_0_24px_-6px_rgba(34,211,238,0.6)]',  text: 'text-cyan-300' },
-  violet:  { dot: 'bg-violet-400',  ring: 'ring-violet-400/30',  glow: 'shadow-[0_0_24px_-6px_rgba(167,139,250,0.6)]', text: 'text-violet-300' },
-  amber:   { dot: 'bg-amber-400',   ring: 'ring-amber-400/30',   glow: 'shadow-[0_0_24px_-6px_rgba(251,191,36,0.6)]',  text: 'text-amber-300' },
-  fuchsia: { dot: 'bg-fuchsia-400', ring: 'ring-fuchsia-400/30', glow: 'shadow-[0_0_24px_-6px_rgba(232,121,249,0.6)]', text: 'text-fuchsia-300' },
-  emerald: { dot: 'bg-emerald-400', ring: 'ring-emerald-400/30', glow: 'shadow-[0_0_24px_-6px_rgba(52,211,153,0.6)]',  text: 'text-emerald-300' },
 }
 
 const STATUS_LABEL: Record<Status, string> = {
@@ -24,59 +13,48 @@ const STATUS_LABEL: Record<Status, string> = {
 }
 
 const STATUS_BADGE: Record<Status, string> = {
-  pending: 'bg-zinc-800/80 text-zinc-400 ring-1 ring-zinc-700/60',
-  running: 'bg-zinc-900 text-zinc-100 ring-1',
-  done:    'bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-400/30',
-  error:   'bg-red-500/10 text-red-300 ring-1 ring-red-400/30',
+  pending: 'bg-zinc-900 text-zinc-500 ring-1 ring-zinc-800',
+  running: 'bg-zinc-900 text-zinc-100 ring-1 ring-zinc-700',
+  done:    'bg-zinc-900 text-zinc-100 ring-1 ring-zinc-700',
+  error:   'bg-red-500/10 text-red-300 ring-1 ring-red-500/30',
 }
 
-export default function StageCard({ name, status, accent = 'cyan' }: StageCardProps) {
-  const a = ACCENT[accent]
+export default function StageCard({ name, status }: StageCardProps) {
   const isRunning = status === 'running'
   const isPending = status === 'pending'
+  const isDone = status === 'done'
 
   return (
-    <div
-      className={[
-        'relative overflow-hidden rounded-xl border bg-zinc-900/60 p-4 backdrop-blur-sm transition',
-        isRunning
-          ? `border-transparent ring-1 ${a.ring} ${a.glow}`
-          : 'border-zinc-800/80',
-      ].join(' ')}
-    >
-      <div
-        aria-hidden
-        className={[
-          'absolute inset-y-0 left-0 w-0.5 transition',
-          isRunning || status === 'done' ? a.dot : 'bg-zinc-800',
-          isRunning ? 'animate-pulse-soft' : '',
-        ].join(' ')}
-      />
-
+    <div className="group relative overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 p-4 transition duration-200 hover:border-zinc-700">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2.5">
           <span
             className={[
-              'h-2 w-2 rounded-full',
-              a.dot,
-              isRunning ? 'animate-pulse-soft' : isPending ? 'opacity-30' : '',
-            ].join(' ')}
+              'h-1.5 w-1.5 rounded-full',
+              isPending && 'bg-zinc-700',
+              isRunning && 'bg-zinc-100 animate-pulse-soft',
+              isDone && 'bg-zinc-100',
+              status === 'error' && 'bg-red-400',
+            ].filter(Boolean).join(' ')}
           />
-          <h3 className="text-base font-medium text-zinc-100">{name}</h3>
+          <h3 className="text-sm font-medium text-zinc-100">{name}</h3>
         </div>
 
         <span
           className={[
-            'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-wider',
+            'inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider',
             STATUS_BADGE[status],
-            isRunning ? a.ring : '',
-            isRunning ? a.text : '',
           ].join(' ')}
         >
           {isRunning && (
-            <svg className="h-3 w-3 animate-spin-slow" viewBox="0 0 24 24" fill="none">
+            <svg className="h-2.5 w-2.5 animate-spin-slow" viewBox="0 0 24 24" fill="none">
               <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
               <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+            </svg>
+          )}
+          {isDone && (
+            <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none">
+              <path d="M5 12l5 5L20 7" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           )}
           {STATUS_LABEL[status]}
@@ -86,11 +64,11 @@ export default function StageCard({ name, status, accent = 'cyan' }: StageCardPr
       <div className="mt-3 text-sm">
         {isPending ? (
           <div className="space-y-2">
-            <div className="shimmer h-3 w-2/3 rounded bg-zinc-800/70" />
-            <div className="shimmer h-3 w-1/2 rounded bg-zinc-800/70" />
+            <div className="shimmer h-2.5 w-2/3 rounded bg-zinc-900" />
+            <div className="shimmer h-2.5 w-1/2 rounded bg-zinc-900" />
           </div>
         ) : (
-          <p className={`italic ${a.text} opacity-80`}>Awaiting citations…</p>
+          <p className="text-zinc-500">Awaiting citations…</p>
         )}
       </div>
     </div>
