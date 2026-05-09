@@ -18,7 +18,7 @@ const ScoreEntryRaw = z.object({
   criterion: z.string().min(1),
   score: z.number().min(1).max(10).nullable(),
   citations: z.array(Citation).default([]),
-  reason: z.string().optional(),
+  reason: z.string().nullable().optional(),
 })
 
 const ScoresResult = z.object({
@@ -31,7 +31,7 @@ export type ScoreEntry = {
   criterion: string
   score: number | null
   citations: Citation[]
-  reason?: string
+  reason?: string | null
   confidence: number
 }
 
@@ -284,7 +284,11 @@ async function callScoreModel(
   }
 
   try {
-    return ScoresResult.parse(JSON.parse(extractJson(raw)))
+    let parsed = JSON.parse(extractJson(raw))
+    if (Array.isArray(parsed)) {
+      parsed = { scores: parsed }
+    }
+    return ScoresResult.parse(parsed)
   } catch (err) {
     throw new ScoreParseError(raw, err)
   }

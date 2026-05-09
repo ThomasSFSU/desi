@@ -51,12 +51,45 @@ export type ScoringSummary = {
   }>
 }
 
+export type CrossReferenceSummary = {
+  status: 'passed' | 'needs_review'
+  checkedCells: number
+  citedCells: number
+  uncitedScores: number
+  insufficientEvidence: number
+  averageConfidence: number
+  issues: Array<{
+    level: 'info' | 'warning'
+    option: string
+    criterion: string
+    message: string
+  }>
+  summary: string
+}
+
+export type VerdictSummary = {
+  winner: 'optionA' | 'optionB' | 'tie'
+  recommendedOption: string
+  confidence: number
+  summary: string
+  keyReasons: string[]
+  tradeoffs: string[]
+  caveats: string[]
+  scorecard: {
+    optionA: { option: string; weightedAverage: number | null; scoredWeight: number; totalWeight: number }
+    optionB: { option: string; weightedAverage: number | null; scoredWeight: number; totalWeight: number }
+  }
+  model: string
+}
+
 interface StageCardProps {
   name: string
   status: Status
   ingest?: IngestSummary
   criteria?: CriteriaSummary
   scoring?: ScoringSummary
+  crossReference?: CrossReferenceSummary
+  verdict?: VerdictSummary
   errorReason?: string | null
   skipReason?: string | null
 }
@@ -77,7 +110,7 @@ const STATUS_BADGE: Record<Status, string> = {
   skipped: 'bg-zinc-900/50 text-zinc-600 ring-1 ring-zinc-800',
 }
 
-export default function StageCard({ name, status, ingest, criteria, scoring, errorReason, skipReason }: StageCardProps) {
+export default function StageCard({ name, status, ingest, criteria, scoring, crossReference, verdict, errorReason, skipReason }: StageCardProps) {
   const isRunning = status === 'running'
   const isPending = status === 'pending'
   const isDone = status === 'done'
@@ -222,6 +255,10 @@ export default function StageCard({ name, status, ingest, criteria, scoring, err
           </div>
         ) : scoring ? (
           <ScoreTable scoring={scoring} />
+        ) : crossReference ? (
+          <CrossReferenceView crossReference={crossReference} />
+        ) : verdict ? (
+          <VerdictView verdict={verdict} />
         ) : isPending ? (
           <div className="space-y-2">
             <div className="shimmer h-2.5 w-2/3 rounded bg-zinc-900" />
@@ -240,6 +277,166 @@ type CellSelection = {
   criterion: string
   entry: ScoreEntry
 } | null
+
+function CrossReferenceView({ crossReference }: { crossReference: CrossReferenceSummary }) {
+  const coverage = crossReference.checkedCells === 0
+    ? 0
+    : Math.round((crossReference.citedCells / crossReference.checkedCells) * 100)
+  const confidence = Math.round(crossReference.averageConfidence * 100)
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span
+          className={[
+            'inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider ring-1',
+            crossReference.status === 'passed'
+              ? 'bg-emerald-500/10 text-emerald-300 ring-emerald-500/30'
+              : 'bg-amber-500/10 text-amber-300 ring-amber-500/30',
+          ].join(' ')}
+        >
+          {crossReference.status === 'passed' ? 'Passed' : 'Review'}
+        </span>
+        <span className="text-xs text-zinc-500">
+          {crossReference.checkedCells} cells checked
+        </span>
+        <span className="text-xs text-zinc-600">
+          {coverage}% citation coverage
+        </span>
+        <span className="text-xs text-zinc-600">
+          {confidence}% avg confidence
+        </span>
+      </div>
+
+      <p className="text-xs leading-5 text-zinc-400">
+        {crossReference.summary}
+      </p>
+
+      {crossReference.issues.length > 0 && (
+        <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+            Sanity-check notes
+          </p>
+          <ul className="mt-2 space-y-2">
+            {crossReference.issues.map((issue, i) => (
+              <li key={`${issue.option}-${issue.criterion}-${i}`} className="text-xs leading-5">
+                <span
+                  className={[
+                    'mr-2 rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider ring-1',
+                    issue.level === 'warning'
+                      ? 'bg-amber-500/10 text-amber-300 ring-amber-500/30'
+                      : 'bg-zinc-950 text-zinc-400 ring-zinc-800',
+                  ].join(' ')}
+                >
+                  {issue.level}
+                </span>
+                <span className="font-medium text-zinc-200">{issue.option}</span>
+                <span className="text-zinc-500"> · {issue.criterion}: </span>
+                <span className="text-zinc-400">{issue.message}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {(crossReference.uncitedScores > 0 || crossReference.insufficientEvidence > 0) && (
+        <div className="flex flex-wrap gap-2 text-[10px] uppercase tracking-wider">
+          <span className="rounded bg-zinc-900 px-2 py-1 text-zinc-500 ring-1 ring-zinc-800">
+            {crossReference.uncitedScores} uncited scores
+          </span>
+          <span className="rounded bg-zinc-900 px-2 py-1 text-zinc-500 ring-1 ring-zinc-800">
+            {crossReference.insufficientEvidence} evidence gaps
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function scoreLabel(value: number | null): string {
+  return value === null ? 'No supported score' : `${value.toFixed(1)}/10`
+}
+
+function VerdictView({ verdict }: { verdict: VerdictSummary }) {
+  const confidence = Math.round(verdict.confidence * 100)
+  const isTie = verdict.winner === 'tie'
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+              Recommendation
+            </p>
+            <p className="mt-1 text-base font-semibold text-zinc-100">
+              {isTie ? 'No clear winner' : verdict.recommendedOption}
+            </p>
+          </div>
+          <span className="rounded-full bg-zinc-950 px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider text-zinc-300 ring-1 ring-zinc-800">
+            {confidence}% confidence
+          </span>
+        </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <div className="rounded-md border border-blue-500/20 bg-blue-500/5 p-3">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-blue-300">
+            {verdict.scorecard.optionA.option}
+          </p>
+          <p className="mt-1 font-mono text-sm text-zinc-100">
+            {scoreLabel(verdict.scorecard.optionA.weightedAverage)}
+          </p>
+          <p className="mt-0.5 text-[10px] text-zinc-500">
+            {verdict.scorecard.optionA.scoredWeight}/{verdict.scorecard.optionA.totalWeight} weighted evidence
+          </p>
+        </div>
+        <div className="rounded-md border border-emerald-500/20 bg-emerald-500/5 p-3">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-emerald-300">
+            {verdict.scorecard.optionB.option}
+          </p>
+          <p className="mt-1 font-mono text-sm text-zinc-100">
+            {scoreLabel(verdict.scorecard.optionB.weightedAverage)}
+          </p>
+          <p className="mt-0.5 text-[10px] text-zinc-500">
+            {verdict.scorecard.optionB.scoredWeight}/{verdict.scorecard.optionB.totalWeight} weighted evidence
+          </p>
+        </div>
+      </div>
+
+      <p className="whitespace-pre-line text-sm leading-6 text-zinc-300">
+        {verdict.summary}
+      </p>
+
+      <VerdictList title="Key reasons" items={verdict.keyReasons} />
+      <VerdictList title="Tradeoffs" items={verdict.tradeoffs} />
+      <VerdictList title="Caveats" items={verdict.caveats} muted />
+
+      <p className="text-[10px] text-zinc-600">
+        Summary model: {verdict.model}
+      </p>
+    </div>
+  )
+}
+
+function VerdictList({ title, items, muted = false }: { title: string; items: string[]; muted?: boolean }) {
+  if (items.length === 0) return null
+
+  return (
+    <div>
+      <p className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">
+        {title}
+      </p>
+      <ul className="mt-2 space-y-1.5">
+        {items.map((item, i) => (
+          <li key={`${title}-${i}`} className={['text-xs leading-5', muted ? 'text-zinc-500' : 'text-zinc-300'].join(' ')}>
+            {item}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
 
 function ScoreTable({ scoring }: { scoring: ScoringSummary }) {
   const [selected, setSelected] = useState<CellSelection>(null)

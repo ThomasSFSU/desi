@@ -1,5 +1,9 @@
 import { useState, type FormEvent } from 'react'
-import StageCard, { type ScoringSummary } from './components/StageCard'
+import StageCard, {
+  type CrossReferenceSummary,
+  type ScoringSummary,
+  type VerdictSummary,
+} from './components/StageCard'
 import SourcesPanel from './components/SourcesPanel'
 
 type GateInfo = {
@@ -58,8 +62,10 @@ type ParseResult = {
   ingest?: IngestSummary
   criteria?: CriteriaSummary
   scoring?: ScoringSummary
+  crossReference?: CrossReferenceSummary
+  verdict?: VerdictSummary
   pipelineStatus?: PipelineStatus
-  scoringSkipped?: boolean
+  usedLighterModel?: boolean
   status?: 'rejected'
   stage?: 'gate'
   reason?: string | null
@@ -87,9 +93,11 @@ type StreamEvent =
   | { type: 'ingest'; data: IngestSummary }
   | { type: 'criteria'; data: CriteriaSummary }
   | { type: 'scoring'; data: ScoringSummary }
+  | { type: 'crossReference'; data: CrossReferenceSummary }
+  | { type: 'verdict'; data: VerdictSummary }
   | { type: 'pipelineFailure'; data: { failedStage: string | null; reason: string | null } }
   | { type: 'fatal'; stage: string; reason: string }
-  | { type: 'done'; data: { comparisonId: string; thinkingMode: boolean; scoringSkipped: boolean } }
+  | { type: 'done'; data: { comparisonId: string; thinkingMode: boolean; usedLighterModel: boolean } }
 
 export default function App() {
   const [input, setInput] = useState('')
@@ -120,12 +128,16 @@ export default function App() {
           return { ...base, criteria: event.data }
         case 'scoring':
           return { ...base, scoring: event.data }
+        case 'crossReference':
+          return { ...base, crossReference: event.data }
+        case 'verdict':
+          return { ...base, verdict: event.data }
         case 'pipelineFailure':
           return { ...base, pipelineStatus: event.data }
         case 'fatal':
           return { ...base, pipelineStatus: { failedStage: event.stage, reason: event.reason } }
         case 'done':
-          return { ...base, comparisonId: event.data.comparisonId, scoringSkipped: event.data.scoringSkipped }
+          return { ...base, comparisonId: event.data.comparisonId, usedLighterModel: event.data.usedLighterModel }
         default:
           return base
       }
@@ -311,23 +323,19 @@ export default function App() {
                 const ingest = name === 'Ingest' ? parsed.ingest : undefined
                 const criteria = name === 'Extract Criteria' ? parsed.criteria : undefined
                 const scoring = name === 'Score' ? parsed.scoring : undefined
+                const crossReference = name === 'Cross-Reference' ? parsed.crossReference : undefined
+                const verdict = name === 'Verdict' ? parsed.verdict : undefined
                 const failedStage = parsed.pipelineStatus?.failedStage ?? null
                 const failedIndex = failedStage ? STAGES.indexOf(failedStage as typeof STAGES[number]) : -1
-                const hasData = Boolean(ingest || criteria || scoring)
-                const scoringIntentionallySkipped =
-                  name === 'Score' && parsed.scoringSkipped && !scoring && !failedStage
+                const hasData = Boolean(ingest || criteria || scoring || crossReference || verdict)
 
                 let status: 'done' | 'error' | 'skipped' | 'pending'
                 if (hasData) status = 'done'
                 else if (failedStage === name) status = 'error'
                 else if (failedIndex >= 0 && i > failedIndex) status = 'skipped'
-                else if (scoringIntentionallySkipped) status = 'skipped'
                 else status = 'pending'
 
                 const errorReason = status === 'error' ? parsed.pipelineStatus?.reason ?? null : null
-                const skipReason = scoringIntentionallySkipped
-                  ? 'Enable Thinking Mode to score with citations'
-                  : null
 
                 return (
                   <div
@@ -344,8 +352,9 @@ export default function App() {
                       ingest={ingest}
                       criteria={criteria}
                       scoring={scoring}
+                      crossReference={crossReference}
+                      verdict={verdict}
                       errorReason={errorReason}
-                      skipReason={skipReason}
                     />
                   </div>
                 )

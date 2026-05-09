@@ -7,8 +7,10 @@ import { fetch as fetchSource, type FetchedSource } from '../ingest/fetcher.js'
 import { proposeSources } from '../ingest/sources.js'
 import { store } from '../ingest/store.js'
 import { verify } from '../ingest/verifier.js'
+import { crossReferenceScores } from '../stages/crossReference.js'
 import { checkComparability } from '../stages/gate.js'
 import { scoreAll, type ScoreEntry } from '../stages/score.js'
+import { buildVerdict } from '../stages/verdict.js'
 
 const router = Router()
 
@@ -277,6 +279,42 @@ router.post('/', async (req: Request, res: Response) => {
     }
   }
 
+  let crossReference
+  if (!pipelineStatus.failedStage && criteria && scoring) {
+    try {
+      crossReference = crossReferenceScores({
+        criteria: criteria.criteria,
+        scoring,
+      })
+      send({ type: 'crossReference', data: crossReference })
+    } catch (err) {
+      console.error('cross-reference sanity check failed:', err)
+      pipelineStatus.failedStage = 'Cross-Reference'
+      pipelineStatus.reason = errorReason(err)
+      send({ type: 'pipelineFailure', data: { failedStage: pipelineStatus.failedStage, reason: pipelineStatus.reason } })
+    }
+  }
+
+  let verdict
+  if (!pipelineStatus.failedStage && criteria && scoring && crossReference) {
+    try {
+      verdict = await buildVerdict({
+        optionA: parsed.optionA,
+        optionB: parsed.optionB,
+        domain: parsed.domain,
+        criteria: criteria.criteria,
+        scoring,
+        crossReference,
+      })
+      send({ type: 'verdict', data: verdict })
+    } catch (err) {
+      console.error('verdict failed:', err)
+      pipelineStatus.failedStage = 'Verdict'
+      pipelineStatus.reason = errorReason(err)
+      send({ type: 'pipelineFailure', data: { failedStage: pipelineStatus.failedStage, reason: pipelineStatus.reason } })
+    }
+  }
+
   const comparisonId = randomUUID()
 
   try {
@@ -290,6 +328,8 @@ router.post('/', async (req: Request, res: Response) => {
       ingestSummary: summary,
       criteria,
       scoring,
+      crossReference,
+      verdict,
       pipelineStatus,
       thinkingMode,
     })
