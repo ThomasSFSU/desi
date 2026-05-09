@@ -3,7 +3,7 @@ import type { Source } from './sources.js'
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-const TIMEOUT_MS = 10_000
+const TIMEOUT_MS = 20_000
 
 export type FetchFailed = Source & {
   status: 'failed'
@@ -112,6 +112,7 @@ export async function fetch(source: Source): Promise<FetchedSource> {
     const response = await globalThis.fetch(source.url, {
       method: 'GET',
       signal: controller.signal,
+      redirect: 'follow',
       headers: {
         'User-Agent': USER_AGENT,
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',

@@ -61,7 +61,18 @@ interface ScoreAllInput {
   model?: string
 }
 
-const SYSTEM_PROMPT = `You are scoring one option against a fixed list of criteria, using ONLY the provided source corpus. For each criterion, output a score 1-10 and at least one citation. A citation is {sourceUrl, quotedText, tier} where quotedText is a verbatim substring (≤200 chars) from that source that supports your score. NEVER invent quotes. If the corpus contains no evidence for a criterion, output score: null and citations: [] with reason: 'insufficient_evidence'. Higher tier sources (1=vendor, 2=structured third-party, 3=community) are more authoritative for factual claims; reverse the weighting for sentiment. Output JSON: {scores: [{criterion: string, score: number | null, citations: [{sourceUrl, quotedText, tier}], reason?: string}]}.`
+const SYSTEM_PROMPT = `You are scoring one option against a fixed list of criteria, using ONLY the provided source corpus.
+
+RULES:
+- Every criterion must have either score (1-10) OR score (null).
+- If NO evidence exists in the corpus: ALWAYS set score to null and reason to 'insufficient_evidence'.
+- DO NOT set score to 0. Only 1-10 or null.
+- For each score, provide citations with sourceUrl, quotedText (≤200 chars verbatim), and tier.
+- NEVER invent quotes or facts.
+- Higher tier (1=vendor, 2=third-party, 3=community) = more authoritative.
+
+Output JSON:
+{"scores": [{"criterion": "criterion_name", "score": 8, "citations": [{"sourceUrl": "https://...", "quotedText": "verbatim_text", "tier": 1}], "reason": null}, {"criterion": "no_evidence", "score": null, "citations": [], "reason": "insufficient_evidence"}]}`
 
 const JSON_ONLY = `Return only valid JSON. No prose, markdown, bullets, headings, or explanation.`
 
@@ -71,9 +82,39 @@ const MAX_TOTAL_CHARS = 24_000
 function extractJson(raw: string): string {
   const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
   if (fenced) return fenced[1].trim()
-  const braced = raw.match(/\{[\s\S]*\}/)
-  if (braced) return braced[0]
-  return raw.trim()
+
+  const trimmed = raw.trim()
+
+  const arrayMatch = trimmed.match(/\[[\s\S]*\]/)
+  if (arrayMatch) {
+    const extracted = arrayMatch[0].trim()
+    try {
+      JSON.parse(extracted)
+      return extracted
+    } catch {
+      // not valid JSON, continue to other extraction methods
+    }
+  }
+
+  const braced = trimmed.match(/\{[\s\S]*\}/)
+  if (braced) {
+    const extracted = braced[0]
+    try {
+      JSON.parse(extracted)
+      return extracted
+    } catch {
+      // not valid JSON, continue
+    }
+  }
+
+  try {
+    JSON.parse(trimmed)
+    return trimmed
+  } catch {
+    // not valid JSON
+  }
+
+  return trimmed
 }
 
 function normalizeWhitespace(value: string): string {
@@ -193,6 +234,15 @@ function logCitationFailures(
   }
 }
 
+function buildFallbackScores(criteria: Criterion[]): z.infer<typeof ScoresResult>['scores'] {
+  return criteria.map((criterion) => ({
+    criterion: criterion.name,
+    score: null,
+    citations: [],
+    reason: 'score_parse_error',
+  }))
+}
+
 function alignToCriteria(
   parsed: z.infer<typeof ScoresResult>,
   criteria: Criterion[],
@@ -201,14 +251,19 @@ function alignToCriteria(
   for (const entry of parsed.scores) {
     byName.set(normalizeCriterion(entry.criterion), entry)
   }
-  const aligned = criteria.map((criterion) => {
+  return criteria.map((criterion) => {
     const entry = byName.get(normalizeCriterion(criterion.name))
     if (!entry) {
-      throw new Error(`missing score for criterion "${criterion.name}"`)
+      console.warn('[score] missing criterion in model output, falling back to null score', { criterion: criterion.name })
+      return {
+        criterion: criterion.name,
+        score: null,
+        citations: [],
+        reason: 'missing_criterion_output',
+      }
     }
     return { ...entry, criterion: criterion.name }
   })
-  return aligned
 }
 
 function enrichCitations(
@@ -288,9 +343,30 @@ async function callScoreModel(
     if (Array.isArray(parsed)) {
       parsed = { scores: parsed }
     }
+    if (parsed.scores && Array.isArray(parsed.scores)) {
+      parsed.scores = parsed.scores.map((entry: any) => {
+        const sanitized: any = {
+          ...entry,
+          score: entry.score === 0 || (entry.score !== null && entry.score < 1) ? null : entry.score,
+          citations: [],
+        }
+        if (Array.isArray(entry.citations)) {
+          sanitized.citations = entry.citations.filter((c: any) => {
+            const url = String(c.sourceUrl || '').trim()
+            const quote = String(c.quotedText || '').trim()
+            return /^https?:\/\/[^\s]+$/.test(url) && quote.length > 0
+          })
+        }
+        return sanitized
+      })
+    }
     return ScoresResult.parse(parsed)
   } catch (err) {
-    throw new ScoreParseError(raw, err)
+    console.warn('[score] parse failed, falling back to null scores', {
+      raw: raw.slice(0, 1000),
+      error: err instanceof Error ? err.message : err,
+    })
+    return { scores: buildFallbackScores(input.criteria) }
   }
 }
 

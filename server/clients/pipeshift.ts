@@ -10,8 +10,8 @@ const client = new OpenAI({
 })
 
 export const CHEAP_MODEL = 'meta-llama/Llama-3.2-3B-Instruct'
-export const HEAVY_MODEL = process.env.PIPESHIFT_MODEL ?? 'moonshotai/Kimi-K2.6'
-export const LONG_CONTEXT_MODEL = process.env.PIPESHIFT_LONG_CONTEXT_MODEL ?? 'MiniMaxAI/MiniMax-M2'
+export const HEAVY_MODEL = process.env.PIPESHIFT_MODEL ?? 'MiniMaxAI/MiniMax-M2'
+export const LONG_CONTEXT_MODEL = process.env.PIPESHIFT_LONG_CONTEXT_MODEL ?? 'moonshotai/Kimi-K2.6'
 
 interface ChatArgs {
   messages: ChatCompletionMessageParam[]
@@ -38,8 +38,9 @@ export async function chat({
 
   const completion = await client.chat.completions.create(params)
   const choice = completion.choices[0]
-  const content = choice?.message?.content ?? ''
-  if (!content) {
+  const rawContent = choice?.message?.content ?? ''
+  const content = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent)
+  if (!content.trim()) {
     console.warn('[pipeshift] empty content returned', {
       model,
       jsonMode,
